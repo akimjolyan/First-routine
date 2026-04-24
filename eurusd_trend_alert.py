@@ -31,11 +31,13 @@ def send_telegram(text):
     for attempt, delay in enumerate(_RETRY_DELAYS, 1):
         try:
             resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
+            print(f"[Telegram] status={resp.status_code} body={resp.text[:200]}")
             resp.raise_for_status()
             return
         except requests.RequestException as exc:
+            print(f"[Telegram] attempt {attempt} failed: {exc}", file=sys.stderr)
             if attempt == len(_RETRY_DELAYS):
-                print(f"Telegram send failed after {attempt} attempts: {exc}", file=sys.stderr)
+                print(f"[Telegram] giving up after {attempt} attempts", file=sys.stderr)
             else:
                 time.sleep(delay)
 
