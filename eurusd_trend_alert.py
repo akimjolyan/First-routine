@@ -1,18 +1,30 @@
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 import requests
 
-TWELVE_DATA_API_KEY = "5591c559bec9447c8a07718de65c18df"
-TELEGRAM_BOT_TOKEN = "8693759554:AAEtJHjHsuv7P_lU1zy55m_g5G4xxDlszcU"
-TELEGRAM_CHAT_ID = "5349585326"
+TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+PAIRS = [
+    "EUR/USD", "USD/JPY", "GBP/USD", "USD/CHF", "AUD/USD",
+    "USD/CAD", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP",
+    "EUR/CHF", "EUR/AUD", "EUR/CAD", "AUD/JPY", "GBP/CHF",
+    "GBP/AUD", "GBP/CAD", "AUD/CHF", "AUD/CAD", "NZD/JPY",
+]
 
 TIMEFRAMES = [
     ("W", "1week"),
     ("D", "1day"),
     ("4H", "4h"),
 ]
+
+_RETRY_DELAYS = [2, 4, 8]
+
+_OUTPUTSIZES = {"W": 200, "D": 100, "4H": 100}
 
 
 def utc_now():
@@ -21,51 +33,72 @@ def utc_now():
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    print(f"[Telegram] sending to chat_id={TELEGRAM_CHAT_ID!r}")
-    try:
-        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
-        print(f"[Telegram] status={resp.status_code} body={resp.text[:300]}")
-        resp.raise_for_status()
-        print("[Telegram] sent OK")
-    except requests.RequestException as exc:
-        print(f"[Telegram] failed: {exc}", file=sys.stderr)
+    for attempt, delay in enumerate(_RETRY_DELAYS, 1):
+        try:
+            resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
+            resp.raise_for_status()
+            return
+        except requests.RequestException as exc:
+            if attempt == len(_RETRY_DELAYS):
+                print(f"Telegram send failed: {exc}", file=sys.stderr)
+            else:
+                time.sleep(delay)
 
-def fetch_candles(label, interval):
+
+def fetch_batch(label, interval, outputsize):
+    """Fetch all PAIRS in a single API call. Returns {pair: [candles]} and a list of errors."""
+    symbols = ",".join(PAIRS)
     url = (
         "https://api.twelvedata.com/time_series"
-        f"?symbol=EUR/USD&interval={interval}&outputsize=50&apikey={TWELVE_DATA_API_KEY}"
+        f"?symbol={symbols}&interval={interval}&outputsize={outputsize}&apikey={TWELVE_DATA_API_KEY}"
     )
-    try:
-        resp = requests.get(url, timeout=15)
-    except requests.RequestException as exc:
-        return None, f"{label} request failed: {exc}"
+    last_err = None
+    for attempt, delay in enumerate(_RETRY_DELAYS, 1):
+        try:
+            resp = requests.get(url, timeout=30)
+        except requests.RequestException as exc:
+            last_err = f"{label} request failed: {exc}"
+            if attempt < len(_RETRY_DELAYS):
+                time.sleep(delay)
+            continue
 
-    if resp.status_code != 200:
-        return None, f"{label} HTTP {resp.status_code}"
+        if resp.status_code != 200:
+            return {}, [f"{label} HTTP {resp.status_code}"]
 
-    data = resp.json()
-    if data.get("status") == "error":
-        msg = data.get("message", "unknown error")
-        return None, f"{label} API error: {msg}"
+        data = resp.json()
 
-    values = data.get("values")
-    if not values:
-        return None, f"{label} returned no candle data"
+        if data.get("status") == "error":
+            return {}, [f"{label} API error: {data.get('message', 'unknown')}"]
 
-    # Twelve Data returns newest-first; reverse to oldest-first for BOS math
-    candles = [
-        {
-            "open": float(c["open"]),
-            "high": float(c["high"]),
-            "low": float(c["low"]),
-            "close": float(c["close"]),
-        }
-        for c in reversed(values)
-    ]
-    return candles, None
+        candles_by_pair = {}
+        errors = []
+        for pair in PAIRS:
+            pair_data = data.get(pair, {})
+            if pair_data.get("status") == "error":
+                errors.append(f"{pair} {label}: {pair_data.get('message', 'unknown')}")
+                continue
+            values = pair_data.get("values")
+            if not values:
+                errors.append(f"{pair} {label}: no candle data")
+                continue
+            candles_by_pair[pair] = [
+                {
+                    "open": float(c["open"]),
+                    "high": float(c["high"]),
+                    "low": float(c["low"]),
+                    "close": float(c["close"]),
+                }
+                for c in reversed(values)
+            ]
+        return candles_by_pair, errors
+
+    return {}, [last_err]
 
 
 def classify_trend(candles):
+    if len(candles) < 5:
+        return "RANGING"
+
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
     close = candles[-1]["close"]
@@ -74,60 +107,82 @@ def classify_trend(candles):
     swing_highs = []
     swing_lows = []
 
-    # Valid swing window: need 2 bars on each side
     for i in range(2, n - 2):
-        if highs[i] > highs[i - 1] and highs[i] > highs[i - 2] and highs[i] > highs[i + 1] and highs[i] > highs[i + 2]:
+        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
             swing_highs.append(highs[i])
-        if lows[i] < lows[i - 1] and lows[i] < lows[i - 2] and lows[i] < lows[i + 1] and lows[i] < lows[i + 2]:
+        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
             swing_lows.append(lows[i])
 
     if len(swing_highs) < 2 or len(swing_lows) < 2:
         return "RANGING"
 
-    latest_sh = swing_highs[-1]
-    latest_sl = swing_lows[-1]
-
-    # Higher highs + higher lows sequence
     hh = swing_highs[-1] > swing_highs[-2]
     hl = swing_lows[-1] > swing_lows[-2]
-    # Lower highs + lower lows sequence
     lh = swing_highs[-1] < swing_highs[-2]
     ll = swing_lows[-1] < swing_lows[-2]
 
-    if close > latest_sh and hh and hl:
+    if close > swing_highs[-1] and hh and hl:
         return "BULLISH"
-    if close < latest_sl and lh and ll:
+    if close < swing_lows[-1] and lh and ll:
         return "BEARISH"
     return "RANGING"
 
 
 def main():
-    # missing = [v for v in ("TWELVE_DATA_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not os.environ.get(v)]
-    # if missing:
-    #     print(f"Missing env vars: {', '.join(missing)}", file=sys.stderr)
-    #     sys.exit(1)
-
-    candle_data = {}
-    for label, interval in TIMEFRAMES:
-        candles, err = fetch_candles(label, interval)
-        if err:
-            send_telegram(f"⚠️ EURUSD Alert Error — {err}\n{utc_now()} UTC")
-            sys.exit(1)
-        candle_data[label] = candles
-
-    results = {label: classify_trend(candle_data[label]) for label, _ in TIMEFRAMES}
-
-    bullish_tfs = [tf for tf, d in results.items() if d == "BULLISH"]
-    bearish_tfs = [tf for tf, d in results.items() if d == "BEARISH"]
+    missing = [name for name, val in [
+        ("TWELVE_DATA_API_KEY", TWELVE_DATA_API_KEY),
+        ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
+        ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID),
+    ] if not val]
+    if missing:
+        print(f"Missing env vars: {', '.join(missing)}", file=sys.stderr)
+        sys.exit(1)
 
     ts = utc_now()
-    if len(bullish_tfs) >= 2:
-        send_telegram(f"🟢 EURUSD BULLISH — {'/'.join(bullish_tfs)}\n{ts} UTC")
-    elif len(bearish_tfs) >= 2:
+    send_telegram(f"🔍 Forex Routine Started — Top 20 Pairs\n{ts} UTC")
 
-        send_telegram(f"🔴 EURUSD BEARISH — {'/'.join(bearish_tfs)}\n{ts} UTC")
+    all_candles = {pair: {} for pair in PAIRS}
+    all_errors = []
 
-    send_telegram(f"test")
+    for label, interval in TIMEFRAMES:
+        candles_by_pair, errors = fetch_batch(label, interval, _OUTPUTSIZES[label])
+        all_errors.extend(errors)
+        for pair, candles in candles_by_pair.items():
+            all_candles[pair][label] = candles
+
+    if all_errors:
+        send_telegram("⚠️ Fetch errors:\n" + "\n".join(all_errors))
+
+    bullish, bearish, ranging = [], [], []
+    for pair in PAIRS:
+        tf_data = all_candles[pair]
+        if len(tf_data) < len(TIMEFRAMES):
+            continue
+        results = {label: classify_trend(tf_data[label]) for label, _ in TIMEFRAMES}
+        bullish_tfs = [tf for tf, d in results.items() if d == "BULLISH"]
+        bearish_tfs = [tf for tf, d in results.items() if d == "BEARISH"]
+        tag = pair.replace("/", "")
+        if len(bullish_tfs) >= 2:
+            bullish.append(f"{tag} ({'/'.join(bullish_tfs)})")
+        elif len(bearish_tfs) >= 2:
+            bearish.append(f"{tag} ({'/'.join(bearish_tfs)})")
+        else:
+            ranging.append(tag)
+
+    ts = utc_now()
+    lines = [f"📊 Forex Scan — {ts} UTC"]
+    if bullish:
+        lines.append("\n🟢 BULLISH:\n" + " · ".join(bullish))
+    if bearish:
+        lines.append("\n🔴 BEARISH:\n" + " · ".join(bearish))
+    if ranging:
+        lines.append("\n⚪ NO SIGNAL:\n" + " · ".join(ranging))
+
+    send_telegram("\n".join(lines))
+
+    if all_errors:
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
