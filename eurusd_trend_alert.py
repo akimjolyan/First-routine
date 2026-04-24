@@ -9,6 +9,8 @@ TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+PAIRS = ["EUR/USD", "GBP/USD", "EUR/GBP"]
+
 TIMEFRAMES = [
     ("W", "1week"),
     ("D", "1day"),
@@ -17,7 +19,6 @@ TIMEFRAMES = [
 
 _RETRY_DELAYS = [2, 4, 8]
 
-# More candles for weekly to guarantee enough swing points
 _OUTPUTSIZES = {"W": 200, "D": 100, "4H": 100}
 
 
@@ -39,31 +40,32 @@ def send_telegram(text):
                 time.sleep(delay)
 
 
-def fetch_candles(label, interval, outputsize):
+def fetch_candles(pair, label, interval, outputsize):
+    symbol = pair.replace("/", "%2F")
     url = (
         "https://api.twelvedata.com/time_series"
-        f"?symbol=EUR/USD&interval={interval}&outputsize={outputsize}&apikey={TWELVE_DATA_API_KEY}"
+        f"?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={TWELVE_DATA_API_KEY}"
     )
     last_err = None
     for attempt, delay in enumerate(_RETRY_DELAYS, 1):
         try:
             resp = requests.get(url, timeout=15)
         except requests.RequestException as exc:
-            last_err = f"{label} request failed: {exc}"
+            last_err = f"{pair} {label} request failed: {exc}"
             if attempt < len(_RETRY_DELAYS):
                 time.sleep(delay)
             continue
 
         if resp.status_code != 200:
-            return None, f"{label} HTTP {resp.status_code}"
+            return None, f"{pair} {label} HTTP {resp.status_code}"
 
         data = resp.json()
         if data.get("status") == "error":
-            return None, f"{label} API error: {data.get('message', 'unknown error')}"
+            return None, f"{pair} {label} API error: {data.get('message', 'unknown error')}"
 
         values = data.get("values")
         if not values:
-            return None, f"{label} returned no candle data"
+            return None, f"{pair} {label} returned no candle data"
 
         candles = [
             {
@@ -112,6 +114,36 @@ def classify_trend(candles):
     return "RANGING"
 
 
+def analyze_pair(pair):
+    errors = []
+    candle_data = {}
+    for label, interval in TIMEFRAMES:
+        candles, err = fetch_candles(pair, label, interval, outputsize=_OUTPUTSIZES[label])
+        if err:
+            errors.append(err)
+        else:
+            candle_data[label] = candles
+
+    if errors:
+        return None, errors
+
+    results = {label: classify_trend(candle_data[label]) for label, _ in TIMEFRAMES}
+    return results, []
+
+
+def format_pair_message(pair, results, ts):
+    bullish_tfs = [tf for tf, d in results.items() if d == "BULLISH"]
+    bearish_tfs = [tf for tf, d in results.items() if d == "BEARISH"]
+    tag = pair.replace("/", "")
+
+    if len(bullish_tfs) >= 2:
+        return f"🟢 {tag} BULLISH — {'/'.join(bullish_tfs)}\n{ts} UTC"
+    if len(bearish_tfs) >= 2:
+        return f"🔴 {tag} BEARISH — {'/'.join(bearish_tfs)}\n{ts} UTC"
+    tf_summary = " | ".join(f"{tf}: {results[tf]}" for tf, _ in TIMEFRAMES)
+    return f"⚪ {tag} NO SIGNAL — {tf_summary}\n{ts} UTC"
+
+
 def main():
     missing = [v for v in ("TWELVE_DATA_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not os.environ.get(v)]
     if missing:
@@ -119,35 +151,20 @@ def main():
         sys.exit(1)
 
     ts = utc_now()
-    send_telegram(f"🔍 EURUSD Routine Started — {ts} UTC")
+    send_telegram(f"🔍 Routine Started — EUR/USD · GBP/USD · EUR/GBP\n{ts} UTC")
 
-    errors = []
-    candle_data = {}
-    for label, interval in TIMEFRAMES:
-        candles, err = fetch_candles(label, interval, outputsize=_OUTPUTSIZES[label])
-        if err:
-            errors.append(err)
+    had_error = False
+    for pair in PAIRS:
+        results, errors = analyze_pair(pair)
+        ts = utc_now()
+        if errors:
+            send_telegram(f"⚠️ {pair} Error\n" + "\n".join(errors) + f"\n{ts} UTC")
+            had_error = True
         else:
-            candle_data[label] = candles
+            send_telegram(format_pair_message(pair, results, ts))
 
-    if errors:
-        send_telegram(f"⚠️ EURUSD Alert Error\n" + "\n".join(errors) + f"\n{ts} UTC")
+    if had_error:
         sys.exit(1)
-
-    results = {label: classify_trend(candle_data[label]) for label, _ in TIMEFRAMES}
-
-    bullish_tfs = [tf for tf, d in results.items() if d == "BULLISH"]
-    bearish_tfs = [tf for tf, d in results.items() if d == "BEARISH"]
-
-    ts = utc_now()
-
-    if len(bullish_tfs) >= 2:
-        send_telegram(f"🟢 EURUSD BULLISH — {'/'.join(bullish_tfs)}\n{ts} UTC")
-    elif len(bearish_tfs) >= 2:
-        send_telegram(f"🔴 EURUSD BEARISH — {'/'.join(bearish_tfs)}\n{ts} UTC")
-    else:
-        tf_summary = " | ".join(f"{tf}: {results[tf]}" for tf, _ in TIMEFRAMES)
-        send_telegram(f"⚪ EURUSD NO SIGNAL — {tf_summary}\n{ts} UTC")
 
 
 if __name__ == "__main__":
