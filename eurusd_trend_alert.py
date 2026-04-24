@@ -28,16 +28,18 @@ def utc_now():
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    print(f"[Telegram] sending to chat_id={TELEGRAM_CHAT_ID!r}")
     for attempt, delay in enumerate(_RETRY_DELAYS, 1):
         try:
             resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
-            print(f"[Telegram] status={resp.status_code} body={resp.text[:200]}")
+            print(f"[Telegram] status={resp.status_code} body={resp.text[:300]}")
             resp.raise_for_status()
+            print("[Telegram] sent OK")
             return
         except requests.RequestException as exc:
             print(f"[Telegram] attempt {attempt} failed: {exc}", file=sys.stderr)
             if attempt == len(_RETRY_DELAYS):
-                print(f"[Telegram] giving up after {attempt} attempts", file=sys.stderr)
+                print(f"[Telegram] giving up", file=sys.stderr)
             else:
                 time.sleep(delay)
 
