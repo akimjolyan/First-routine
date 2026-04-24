@@ -26,6 +26,10 @@ _RETRY_DELAYS = [2, 4, 8]
 
 _OUTPUTSIZES = {"W": 200, "D": 100, "4H": 100}
 
+# Free plan: 8 credits/min, each symbol = 1 credit
+_BATCH_SIZE = 8
+_RATE_LIMIT_WAIT = 61  # seconds between batches
+
 
 def utc_now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -45,9 +49,9 @@ def send_telegram(text):
                 time.sleep(delay)
 
 
-def fetch_batch(label, interval, outputsize):
-    """Fetch all PAIRS in a single API call. Returns {pair: [candles]} and a list of errors."""
-    symbols = ",".join(PAIRS)
+def fetch_batch(pairs, label, interval, outputsize):
+    """Fetch a batch of pairs in one API call. Returns {pair: [candles]} and errors."""
+    symbols = ",".join(pairs)
     url = (
         "https://api.twelvedata.com/time_series"
         f"?symbol={symbols}&interval={interval}&outputsize={outputsize}&apikey={TWELVE_DATA_API_KEY}"
@@ -70,9 +74,13 @@ def fetch_batch(label, interval, outputsize):
         if data.get("status") == "error":
             return {}, [f"{label} API error: {data.get('message', 'unknown')}"]
 
+        # Single-symbol response has "values" at top level
+        if "values" in data:
+            data = {pairs[0]: data}
+
         candles_by_pair = {}
         errors = []
-        for pair in PAIRS:
+        for pair in pairs:
             pair_data = data.get(pair, {})
             if pair_data.get("status") == "error":
                 errors.append(f"{pair} {label}: {pair_data.get('message', 'unknown')}")
@@ -93,6 +101,23 @@ def fetch_batch(label, interval, outputsize):
         return candles_by_pair, errors
 
     return {}, [last_err]
+
+
+def fetch_all(all_candles, all_errors):
+    """Fetch all pairs across all timeframes, respecting the 8 credits/min rate limit."""
+    call_number = 0
+    batches = [PAIRS[i:i + _BATCH_SIZE] for i in range(0, len(PAIRS), _BATCH_SIZE)]
+
+    for label, interval in TIMEFRAMES:
+        for batch in batches:
+            if call_number > 0:
+                print(f"Rate limit pause {_RATE_LIMIT_WAIT}s before next batch...")
+                time.sleep(_RATE_LIMIT_WAIT)
+            candles_by_pair, errors = fetch_batch(batch, label, interval, _OUTPUTSIZES[label])
+            all_errors.extend(errors)
+            for pair, candles in candles_by_pair.items():
+                all_candles[pair][label] = candles
+            call_number += 1
 
 
 def classify_trend(candles):
@@ -144,11 +169,7 @@ def main():
     all_candles = {pair: {} for pair in PAIRS}
     all_errors = []
 
-    for label, interval in TIMEFRAMES:
-        candles_by_pair, errors = fetch_batch(label, interval, _OUTPUTSIZES[label])
-        all_errors.extend(errors)
-        for pair, candles in candles_by_pair.items():
-            all_candles[pair][label] = candles
+    fetch_all(all_candles, all_errors)
 
     if all_errors:
         send_telegram("⚠️ Fetch errors:\n" + "\n".join(all_errors))
