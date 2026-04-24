@@ -147,7 +147,11 @@ def format_pair_message(pair, results, ts):
 
 
 def main():
-    missing = [v for v in ("TWELVE_DATA_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not os.environ.get(v)]
+    missing = [name for name, val in [
+        ("TWELVE_DATA_API_KEY", TWELVE_DATA_API_KEY),
+        ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
+        ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID),
+    ] if not val]
     if missing:
         print(f"Missing env vars: {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
