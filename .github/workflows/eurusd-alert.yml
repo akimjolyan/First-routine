@@ -2,8 +2,8 @@ name: EURUSD Trend Alert
 
 on:
   schedule:
-    # Runs at the close of each 4H candle (UTC): 00:00, 04:00, 08:00, 12:00, 16:00, 20:00
-    - cron: "5 0,4,8,12,16,20 * * *"
+    - cron: "0 9 * * 1-5"   # 9:00 AM UTC, Monday–Friday
+    - cron: "38 16 * * *"   # one-time test run today (remove after testing)
   workflow_dispatch: # allow manual trigger
 
 jobs:
