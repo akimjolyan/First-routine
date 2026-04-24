@@ -4,9 +4,9 @@ from datetime import datetime, timezone
 
 import requests
 
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TWELVE_DATA_API_KEY = "5591c559bec9447c8a07718de65c18df"
+TELEGRAM_BOT_TOKEN = "8693759554:AAEtJHjHsuv7P_lU1zy55m_g5G4xxDlszcU"
+TELEGRAM_CHAT_ID = "5349585326"
 
 TIMEFRAMES = [
     ("W", "1week"),
@@ -21,8 +21,14 @@ def utc_now():
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
-
+    print(f"[Telegram] sending to chat_id={TELEGRAM_CHAT_ID!r}")
+    try:
+        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
+        print(f"[Telegram] status={resp.status_code} body={resp.text[:300]}")
+        resp.raise_for_status()
+        print("[Telegram] sent OK")
+    except requests.RequestException as exc:
+        print(f"[Telegram] failed: {exc}", file=sys.stderr)
 
 def fetch_candles(label, interval):
     url = (
@@ -96,10 +102,10 @@ def classify_trend(candles):
 
 
 def main():
-    missing = [v for v in ("TWELVE_DATA_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not os.environ.get(v)]
-    if missing:
-        print(f"Missing env vars: {', '.join(missing)}", file=sys.stderr)
-        sys.exit(1)
+    # missing = [v for v in ("TWELVE_DATA_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not os.environ.get(v)]
+    # if missing:
+    #     print(f"Missing env vars: {', '.join(missing)}", file=sys.stderr)
+    #     sys.exit(1)
 
     candle_data = {}
     for label, interval in TIMEFRAMES:
@@ -115,12 +121,13 @@ def main():
     bearish_tfs = [tf for tf, d in results.items() if d == "BEARISH"]
 
     ts = utc_now()
-
     if len(bullish_tfs) >= 2:
         send_telegram(f"🟢 EURUSD BULLISH — {'/'.join(bullish_tfs)}\n{ts} UTC")
     elif len(bearish_tfs) >= 2:
+
         send_telegram(f"🔴 EURUSD BEARISH — {'/'.join(bearish_tfs)}\n{ts} UTC")
 
+    send_telegram(f"test")
 
 if __name__ == "__main__":
     main()
