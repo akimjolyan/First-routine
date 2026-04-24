@@ -1,0 +1,28 @@
+name: EURUSD Trend Alert
+
+on:
+  schedule:
+    # Runs at the close of each 4H candle (UTC): 00:00, 04:00, 08:00, 12:00, 16:00, 20:00
+    - cron: "5 0,4,8,12,16,20 * * *"
+  workflow_dispatch: # allow manual trigger
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run trend alert
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python eurusd_trend_alert.py
