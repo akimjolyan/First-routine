@@ -78,10 +78,13 @@ def fetch_batch(pairs, label, interval, outputsize):
         if "values" in data:
             data = {pairs[0]: data}
 
+        # Build a lookup tolerant of key format differences (EUR/USD vs EURUSD etc.)
+        normalized = {k.replace("/", "").upper(): v for k, v in data.items()}
+
         candles_by_pair = {}
         errors = []
         for pair in pairs:
-            pair_data = data.get(pair, {})
+            pair_data = data.get(pair) or normalized.get(pair.replace("/", "").upper(), {})
             if pair_data.get("status") == "error":
                 errors.append(f"{pair} {label}: {pair_data.get('message', 'unknown')}")
                 continue
