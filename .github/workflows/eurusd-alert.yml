@@ -2,8 +2,7 @@ name: EURUSD Trend Alert
 
 on:
   schedule:
-    - cron: "0 9 * * 1-5"   # 9:00 AM UTC, Monday–Friday
-    - cron: "38 16 * * *"   # one-time test run today (remove after testing)
+    - cron: "0 17 * * 1-5"  # 20:00 Israel time (UTC+3 DST), Monday–Friday
   workflow_dispatch: # allow manual trigger
 
 jobs:
