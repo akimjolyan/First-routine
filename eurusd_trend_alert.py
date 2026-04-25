@@ -51,7 +51,7 @@ def send_telegram(text):
 
 def fetch_batch(pairs, label, interval, outputsize):
     """Fetch a batch of pairs in one API call. Returns {pair: [candles]} and errors."""
-    symbols = ",".join(pairs)
+    symbols = ",".join(p.replace("/", "%2F") for p in pairs)
     url = (
         "https://api.twelvedata.com/time_series"
         f"?symbol={symbols}&interval={interval}&outputsize={outputsize}&apikey={TWELVE_DATA_API_KEY}"
@@ -70,6 +70,7 @@ def fetch_batch(pairs, label, interval, outputsize):
             return {}, [f"{label} HTTP {resp.status_code}"]
 
         data = resp.json()
+        print(f"[Debug] {label} response keys: {list(data.keys())[:5]}")
 
         if data.get("status") == "error":
             return {}, [f"{label} API error: {data.get('message', 'unknown')}"]
