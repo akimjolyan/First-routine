@@ -4,10 +4,10 @@ import time
 from datetime import datetime, timezone
 
 import requests
+import yfinance as yf
 
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8693759554:AAEtJHjHsuv7P_lU1zy55m_g5G4xxDlszcU")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "5349585326")
 
 PAIRS = [
     "EUR/USD", "USD/JPY", "GBP/USD", "USD/CHF", "AUD/USD",
@@ -16,23 +16,23 @@ PAIRS = [
     "GBP/AUD", "GBP/CAD", "AUD/CHF", "AUD/CAD", "NZD/JPY",
 ]
 
+# (label, yfinance interval, number of candles to keep)
 TIMEFRAMES = [
-    ("W", "1week"),
-    ("D", "1day"),
-    ("4H", "4h"),
+    ("W",  "1wk", 200),
+    ("D",  "1d",  100),
+    ("4H", "4h",  100),
 ]
 
 _RETRY_DELAYS = [2, 4, 8]
 
-_OUTPUTSIZES = {"W": 200, "D": 100, "4H": 100}
-
-# Free plan: 8 credits/min, each symbol = 1 credit
-_BATCH_SIZE = 8
-_RATE_LIMIT_WAIT = 61  # seconds between batches
-
 
 def utc_now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
+def to_yf_symbol(pair):
+    """Convert 'EUR/USD' to 'EURUSD=X' for yfinance."""
+    return pair.replace("/", "") + "=X"
 
 
 def send_telegram(text):
@@ -49,88 +49,78 @@ def send_telegram(text):
                 time.sleep(delay)
 
 
-def fetch_batch(pairs, label, interval, outputsize):
-    """Fetch a batch of pairs in one API call. Returns {pair: [candles]} and errors."""
-    symbols = ",".join(p.replace("/", "%2F") for p in pairs)
-    url = (
-        "https://api.twelvedata.com/time_series"
-        f"?symbol={symbols}&interval={interval}&outputsize={outputsize}&apikey={TWELVE_DATA_API_KEY}"
-    )
-    last_err = None
+def fetch_timeframe(label, interval, outputsize):
+    """Fetch OHLC candles for all pairs on one timeframe. Returns {pair: [candles]}, [errors]."""
+    symbols = [to_yf_symbol(p) for p in PAIRS]
+    period = "5y" if label == "W" else "2y" if label == "D" else "1y"
+
     for attempt, delay in enumerate(_RETRY_DELAYS, 1):
         try:
-            resp = requests.get(url, timeout=30)
-        except requests.RequestException as exc:
-            last_err = f"{label} request failed: {exc}"
-            if attempt < len(_RETRY_DELAYS):
-                time.sleep(delay)
-            continue
+            raw = yf.download(
+                tickers=symbols,
+                period=period,
+                interval=interval,
+                group_by="ticker",
+                auto_adjust=True,
+                progress=False,
+            )
+            break
+        except Exception as exc:
+            if attempt == len(_RETRY_DELAYS):
+                return {}, [f"{label} download failed: {exc}"]
+            time.sleep(delay)
 
-        if resp.status_code != 200:
-            return {}, [f"{label} HTTP {resp.status_code}"]
+    candles_by_pair = {}
+    errors = []
 
-        data = resp.json()
-        print(f"[Debug] {label} response keys: {list(data.keys())[:5]}")
+    for pair in PAIRS:
+        sym = to_yf_symbol(pair)
+        try:
+            if len(symbols) == 1:
+                df = raw
+            else:
+                df = raw[sym]
 
-        if data.get("status") == "error":
-            return {}, [f"{label} API error: {data.get('message', 'unknown')}"]
-
-        # Single-symbol response has "values" at top level
-        if "values" in data:
-            data = {pairs[0]: data}
-
-        # Build a lookup tolerant of key format differences (EUR/USD vs EURUSD etc.)
-        normalized = {k.replace("/", "").upper(): v for k, v in data.items()}
-
-        candles_by_pair = {}
-        errors = []
-        for pair in pairs:
-            pair_data = data.get(pair) or normalized.get(pair.replace("/", "").upper(), {})
-            if pair_data.get("status") == "error":
-                errors.append(f"{pair} {label}: {pair_data.get('message', 'unknown')}")
-                continue
-            values = pair_data.get("values")
-            if not values:
+            df = df.dropna(subset=["Open", "High", "Low", "Close"])
+            if df.empty:
                 errors.append(f"{pair} {label}: no candle data")
                 continue
+
+            rows = df.tail(outputsize)
             candles_by_pair[pair] = [
                 {
-                    "open": float(c["open"]),
-                    "high": float(c["high"]),
-                    "low": float(c["low"]),
-                    "close": float(c["close"]),
+                    "open":  float(row["Open"]),
+                    "high":  float(row["High"]),
+                    "low":   float(row["Low"]),
+                    "close": float(row["Close"]),
                 }
-                for c in reversed(values)
+                for _, row in rows.iterrows()
             ]
-        return candles_by_pair, errors
+        except Exception as exc:
+            errors.append(f"{pair} {label}: {exc}")
 
-    return {}, [last_err]
+    print(f"[Debug] {label} fetched {len(candles_by_pair)}/{len(PAIRS)} pairs")
+    return candles_by_pair, errors
 
 
 def fetch_all(all_candles, all_errors):
-    """Fetch all pairs across all timeframes, respecting the 8 credits/min rate limit."""
-    call_number = 0
-    batches = [PAIRS[i:i + _BATCH_SIZE] for i in range(0, len(PAIRS), _BATCH_SIZE)]
+    for label, interval, outputsize in TIMEFRAMES:
+        candles_by_pair, errors = fetch_timeframe(label, interval, outputsize)
+        all_errors.extend(errors)
+        for pair, candles in candles_by_pair.items():
+            all_candles[pair][label] = candles
 
-    for label, interval in TIMEFRAMES:
-        for batch in batches:
-            if call_number > 0:
-                print(f"Rate limit pause {_RATE_LIMIT_WAIT}s before next batch...")
-                time.sleep(_RATE_LIMIT_WAIT)
-            candles_by_pair, errors = fetch_batch(batch, label, interval, _OUTPUTSIZES[label])
-            all_errors.extend(errors)
-            for pair, candles in candles_by_pair.items():
-                all_candles[pair][label] = candles
-            call_number += 1
+
+_TREND_WINDOW = 40  # only look at recent candles for trend structure
 
 
 def classify_trend(candles):
+    candles = candles[-_TREND_WINDOW:]
     if len(candles) < 5:
         return "RANGING"
 
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
-    close = candles[-1]["close"]
     n = len(candles)
 
     swing_highs = []
@@ -146,20 +136,19 @@ def classify_trend(candles):
         return "RANGING"
 
     hh = swing_highs[-1] > swing_highs[-2]
-    hl = swing_lows[-1] > swing_lows[-2]
+    hl = swing_lows[-1]  > swing_lows[-2]
     lh = swing_highs[-1] < swing_highs[-2]
-    ll = swing_lows[-1] < swing_lows[-2]
+    ll = swing_lows[-1]  < swing_lows[-2]
 
-    if close > swing_highs[-1] and hh and hl:
+    if hh and hl:
         return "BULLISH"
-    if close < swing_lows[-1] and lh and ll:
+    if lh and ll:
         return "BEARISH"
     return "RANGING"
 
 
 def main():
     missing = [name for name, val in [
-        ("TWELVE_DATA_API_KEY", TWELVE_DATA_API_KEY),
         ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
         ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID),
     ] if not val]
@@ -183,14 +172,22 @@ def main():
         tf_data = all_candles[pair]
         if len(tf_data) < len(TIMEFRAMES):
             continue
-        results = {label: classify_trend(tf_data[label]) for label, _ in TIMEFRAMES}
-        bullish_tfs = [tf for tf, d in results.items() if d == "BULLISH"]
-        bearish_tfs = [tf for tf, d in results.items() if d == "BEARISH"]
+        results = {label: classify_trend(tf_data[label]) for label, _, _ in TIMEFRAMES}
+        w, d, h4 = results["W"], results["D"], results["4H"]
         tag = pair.replace("/", "")
-        if len(bullish_tfs) >= 2:
-            bullish.append(f"{tag} ({'/'.join(bullish_tfs)})")
-        elif len(bearish_tfs) >= 2:
-            bearish.append(f"{tag} ({'/'.join(bearish_tfs)})")
+
+        # Signal requires W+D aligned, or D+4H aligned
+        if w == d and w != "RANGING":
+            tfs = f"W+D+4H" if h4 == w else "W+D"
+            if w == "BULLISH":
+                bullish.append(f"{tag} ({tfs})")
+            else:
+                bearish.append(f"{tag} ({tfs})")
+        elif d == h4 and d != "RANGING":
+            if d == "BULLISH":
+                bullish.append(f"{tag} (D+4H)")
+            else:
+                bearish.append(f"{tag} (D+4H)")
         else:
             ranging.append(tag)
 
