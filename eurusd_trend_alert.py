@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 import requests
 import yfinance as yf
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8693759554:AAEtJHjHsuv7P_lU1zy55m_g5G4xxDlszcU")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "5349585326")
+TELEGRAM_BOT_TOKEN = "8693759554:AAEtJHjHsuv7P_lU1zy55m_g5G4xxDlszcU"
+TELEGRAM_CHAT_ID = "5349585326"
 
 PAIRS = [
     "EUR/USD", "USD/JPY", "GBP/USD", "USD/CHF", "AUD/USD",
